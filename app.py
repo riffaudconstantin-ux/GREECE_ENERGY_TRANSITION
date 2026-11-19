@@ -262,40 +262,79 @@ def apply_chart_design(fig):
 
 
 # =====================================================
-# LOAD ELECTRICITY GENERATION DATA
+# LOAD EMBER ELECTRICITY GENERATION DATA
 # =====================================================
 
-DATA_PATH = Path("data/greece_energy.csv")
+MONTHLY_EMBER_PATH = Path("data/release_generation_monthly_global.csv")
+YEARLY_EMBER_PATH = Path("data/release_generation_yearly_lower.csv")
 
-if not DATA_PATH.exists():
-    show_notice("Electricity dataset not found.", "error")
+if not MONTHLY_EMBER_PATH.exists():
+    show_notice(
+        "Ember monthly dataset not found. Place release_generation_monthly_global.csv in the data folder.",
+        "error"
+    )
     st.stop()
 
-df = pd.read_csv(DATA_PATH)
-
-required_columns = [
-    "date", "fuel_code", "fuel",
-    "value", "unit", "source"
-]
-
-if not all(column in df.columns for column in required_columns):
-    show_notice("Electricity dataset has missing columns.", "error")
+if not YEARLY_EMBER_PATH.exists():
+    show_notice(
+        "Ember yearly dataset not found. Place release_generation_yearly_lower.csv in the data folder.",
+        "error"
+    )
     st.stop()
 
-df["value"] = pd.to_numeric(df["value"], errors="coerce")
+monthly_raw = pd.read_csv(MONTHLY_EMBER_PATH)
+yearly_raw = pd.read_csv(YEARLY_EMBER_PATH)
 
-df["date"] = pd.to_datetime(
-    df["date"],
-    format="%Y-%m",
-    errors="coerce"
-)
+ember_required = ["Area", "Date", "Electricity source", "Generation (TWh)"]
+if not all(col in monthly_raw.columns for col in ember_required):
+    show_notice("Ember monthly dataset has an unexpected structure.", "error")
+    st.stop()
 
-df = df.dropna(
-    subset=["value", "date", "fuel_code"]
-)
+# Monthly Ember data: Greece only, January 2019 onward.
+monthly_greece = monthly_raw[monthly_raw["Area"].eq("Greece")].copy()
+monthly_greece["date"] = pd.to_datetime(monthly_greece["Date"], errors="coerce")
+monthly_greece["value"] = pd.to_numeric(monthly_greece["Generation (TWh)"], errors="coerce") * 1000
+monthly_greece = monthly_greece[
+    (monthly_greece["date"] >= pd.Timestamp("2019-01-01"))
+    & (~monthly_greece["Is aggregated source"].fillna(False).astype(bool))
+].dropna(subset=["date", "value"])
 
-df["year"] = df["date"].dt.year
+# Keep only disaggregated generation sources in the chart. Demand and net imports
+# are system indicators, not domestic electricity generation sources.
+monthly_greece = monthly_greece[
+    ~monthly_greece["Electricity source"].isin(["Demand", "Net imports"])
+].copy()
+monthly_greece["fuel"] = monthly_greece["Electricity source"]
+monthly_greece["fuel_code"] = monthly_greece["Electricity source"]
+monthly_greece["unit"] = "GWh"
+monthly_greece["source"] = "Ember – Monthly Electricity Data"
+monthly_greece["year"] = monthly_greece["date"].dt.year
 
+df = monthly_greece[["date", "fuel_code", "fuel", "value", "unit", "source", "year"]].copy()
+df = df.sort_values(["date", "fuel"])
+
+# Annual Ember data: retain disaggregated generation sources only. Ember's
+# published generation shares are used directly rather than reconstructing
+# totals from overlapping aggregated categories.
+yearly_required = ["Area", "Year", "Electricity source", "Is aggregated source", "Generation (TWh)", "Share of generation (%)"]
+if not all(col in yearly_raw.columns for col in yearly_required):
+    show_notice("Ember yearly dataset has an unexpected structure.", "error")
+    st.stop()
+
+yearly_greece = yearly_raw[
+    (yearly_raw["Area"].eq("Greece"))
+    & (pd.to_numeric(yearly_raw["Year"], errors="coerce").between(2019, 2025))
+    & (~yearly_raw["Is aggregated source"].fillna(False).astype(bool))
+].copy()
+yearly_greece["Year"] = pd.to_numeric(yearly_greece["Year"], errors="coerce").astype("Int64")
+yearly_greece["Generation (TWh)"] = pd.to_numeric(yearly_greece["Generation (TWh)"], errors="coerce")
+yearly_greece["Share of generation (%)"] = pd.to_numeric(yearly_greece["Share of generation (%)"], errors="coerce")
+yearly_greece = yearly_greece.dropna(subset=["Year", "Generation (TWh)", "Share of generation (%)"])
+yearly_greece = yearly_greece[~yearly_greece["Electricity source"].isin(["Demand", "Net imports"])]
+yearly_greece["year"] = yearly_greece["Year"].astype(int)
+yearly_greece["fuel"] = yearly_greece["Electricity source"]
+yearly_greece["generation_twh"] = yearly_greece["Generation (TWh)"]
+yearly_greece["share"] = yearly_greece["Share of generation (%)"]
 
 # =====================================================
 # LOAD ENERGY SECURITY DATA
@@ -422,8 +461,9 @@ page = st.sidebar.radio(
 
 st.sidebar.divider()
 
-st.sidebar.caption("DATA SOURCE: EUROSTAT")
-st.sidebar.caption("GENERATION DATA: 2008–2026")
+st.sidebar.caption("GENERATION SOURCE: EMBER")
+st.sidebar.caption("MONTHLY GENERATION: 2019–LATEST AVAILABLE")
+st.sidebar.caption("ANNUAL MIX: 2019–2025")
 
 if security is not None:
     st.sidebar.caption("SECURITY DATA: 1990–2025")
@@ -436,7 +476,7 @@ st.sidebar.divider()
 st.sidebar.markdown("### DATA PROVENANCE")
 
 st.sidebar.markdown(
-    "[Eurostat – Electricity Generation](https://ec.europa.eu/eurostat/databrowser/view/nrg_cb_pem/default/table)"
+    "[Ember – Electricity Data Explorer](https://ember-energy.org/data/electricity-data-explorer/)"
 )
 
 st.sidebar.markdown(
@@ -534,83 +574,65 @@ if page == "Executive Overview":
 elif page == "Electricity Generation":
 
     st.title("ELECTRICITY GENERATION")
-
-    st.caption("GREECE | MONTHLY NET ELECTRICITY GENERATION")
-
+    st.caption("GREECE | MONTHLY ELECTRICITY GENERATION BY SOURCE")
     st.divider()
 
-    fuels = sorted(df["fuel"].dropna().unique())
-
-    default_fuels = [
-        fuel for fuel in [
-            "Natural gas",
-            "Wind",
-            "Solar",
-            "Hydro",
-            "Coal and manufactured gases"
-        ]
-        if fuel in fuels
-    ]
-
-    selected_fuels = st.multiselect(
-        "Select energy sources",
-        fuels,
-        default=default_fuels
-    )
-
-    if selected_fuels:
-
-        chart_data = df[
-            df["fuel"].isin(selected_fuels)
-        ].copy()
-
-        fig = px.line(
-            chart_data,
-            x="date",
-            y="value",
-            color="fuel",
-            title="Monthly Electricity Generation by Energy Source"
-        )
-
-        fig.update_layout(
-            xaxis_title="Date",
-            yaxis_title="Electricity Generation (GWh)",
-            legend_title="ENERGY SOURCE",
-            hovermode="x unified"
-        )
-
-        fig = apply_chart_design(fig)
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True,
-            theme=None
-        )
-
+    available_months = sorted(df["date"].dropna().unique())
+    if not available_months:
+        show_notice("No monthly Ember observations are available for Greece since 2019.", "warning")
     else:
-
-        show_notice(
-            "Select at least one energy source.",
-            "warning"
+        min_date = pd.Timestamp(min(available_months)).to_pydatetime()
+        max_date = pd.Timestamp(max(available_months)).to_pydatetime()
+        date_range = st.date_input(
+            "Select period",
+            value=(min_date.date(), max_date.date()),
+            min_value=min_date.date(),
+            max_value=max_date.date()
         )
+        fuels = sorted(df["fuel"].dropna().unique())
+        preferred = ["Gas", "Wind", "Solar", "Hydro", "Coal", "Other fossil"]
+        defaults = [x for x in preferred if x in fuels]
+        selected_fuels = st.multiselect("Select energy sources", fuels, default=defaults)
 
-    st.divider()
+        if len(date_range) == 2:
+            start_date, end_date = date_range
+            chart_data = df[
+                df["date"].between(pd.Timestamp(start_date), pd.Timestamp(end_date))
+                & df["fuel"].isin(selected_fuels)
+            ].copy()
+        else:
+            chart_data = df[df["fuel"].isin(selected_fuels)].copy()
 
-    st.subheader("Historical Dataset")
+        if not chart_data.empty:
+            fig = px.line(
+                chart_data, x="date", y="value", color="fuel",
+                title="Monthly Electricity Generation by Energy Source",
+                hover_data={"value": ":,.1f", "unit": True}
+            )
+            fig.update_layout(
+                xaxis_title="Month", yaxis_title="Electricity Generation (GWh)",
+                legend_title="ENERGY SOURCE", hovermode="x unified"
+            )
+            fig = apply_chart_design(fig)
+            st.plotly_chart(fig, use_container_width=True, theme=None)
+        elif selected_fuels:
+            show_notice("No observations match the selected period and sources.", "warning")
+        else:
+            show_notice("Select at least one energy source.", "warning")
 
-    st.dataframe(
-        df[
-            ["date", "fuel_code", "fuel", "value", "unit", "source"]
-        ],
-        use_container_width=True,
-        hide_index=True
-    )
-
-    st.caption(
-        "Source: Eurostat | Dataset: nrg_cb_pem. "
-        "Coal and manufactured gases is an aggregated category "
-        "and must not be interpreted as lignite alone."
-    )
+        st.divider()
+        st.subheader("Monthly Ember Dataset")
+        st.dataframe(
+            chart_data[["date", "fuel", "value", "unit", "source"]].rename(
+                columns={"date": "Month", "fuel": "Energy Source", "value": "Generation (GWh)", "unit": "Unit", "source": "Source"}
+            ), use_container_width=True, hide_index=True
+        )
+        st.caption(
+            "Source: Ember, Monthly Electricity Data (Global release). "
+            "Greece only; January 2019 to latest month present in the downloaded release. "
+            "Ember generation values in TWh are converted to GWh (×1,000). "
+            "Only disaggregated generation-source rows are plotted; aggregated totals, demand and net imports are excluded."
+        )
 
 
 # =====================================================
@@ -620,122 +642,50 @@ elif page == "Electricity Generation":
 elif page == "Annual Energy Mix":
 
     st.title("ANNUAL ELECTRICITY MIX")
-
     st.caption("GREECE | ANNUAL GENERATION SHARES")
-
     st.divider()
 
-    selected_codes = [
-        "C0000", "G3000", "O4000XBIO",
-        "N9000", "RA100", "RA200",
-        "RA300", "RA400", "RA500_5160", "X9900"
-    ]
-
-    fuel_data = df[
-        df["fuel_code"].isin(selected_codes)
-    ].copy()
-
-    annual_fuel = (
-        fuel_data.groupby(
-            ["year", "fuel_code", "fuel"],
-            as_index=False
-        )["value"].sum()
-    )
-
-    total_data = df[
-        df["fuel_code"] == "TOTAL"
-    ].copy()
-
-    annual_total = (
-        total_data.groupby("year", as_index=False)["value"]
-        .sum()
-        .rename(columns={"value": "total_generation"})
-    )
-
-    annual_mix = annual_fuel.merge(
-        annual_total,
-        on="year",
-        how="inner"
-    )
-
-    annual_mix["share"] = (
-        annual_mix["value"]
-        / annual_mix["total_generation"]
-        * 100
-    )
-
-    available_years = sorted(
-        annual_mix["year"].unique()
-    )
-
-    preferred_years = [2008, 2015, 2020, 2025]
-
-    selected_years = [
-        year for year in preferred_years
-        if year in available_years
-    ]
-
-    annual_mix = annual_mix[
-        annual_mix["year"].isin(selected_years)
-    ]
+    annual_mix = yearly_greece[["year", "fuel", "generation_twh", "share"]].copy()
+    annual_mix = annual_mix.sort_values(["year", "fuel"])
 
     if not annual_mix.empty:
-
         fig = px.bar(
-            annual_mix,
-            x="year",
-            y="share",
-            color="fuel",
-            barmode="stack",
-            title="Electricity Generation Mix",
-            hover_data={
-                "value": ":,.1f",
-                "total_generation": ":,.1f",
-                "share": ":.2f"
-            }
+            annual_mix, x="year", y="share", color="fuel", barmode="stack",
+            title="Annual Electricity Generation Mix (Ember published shares)",
+            hover_data={"generation_twh": ":,.2f", "share": ":.2f"}
         )
-
         fig.update_layout(
-            xaxis_title="Year",
-            yaxis_title="Share of Total Generation (%)",
-            legend_title="ENERGY SOURCE"
+            xaxis_title="Year", yaxis_title="Share of Total Generation (%)",
+            legend_title="ENERGY SOURCE", hovermode="x unified"
         )
-
         fig = apply_chart_design(fig)
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True,
-            theme=None
-        )
+        st.plotly_chart(fig, use_container_width=True, theme=None)
 
         st.divider()
-
         st.subheader("Annual Generation Data")
-
         st.dataframe(
-            annual_mix[
-                ["year", "fuel", "value", "total_generation", "share"]
-            ].rename(
-                columns={
-                    "year": "Year",
-                    "fuel": "Energy Source",
-                    "value": "Generation (GWh)",
-                    "total_generation": "Total Generation (GWh)",
-                    "share": "Share (%)"
-                }
-            ),
-            use_container_width=True,
-            hide_index=True
+            annual_mix.rename(columns={
+                "year": "Year", "fuel": "Energy Source",
+                "generation_twh": "Generation (TWh)", "share": "Share of Generation (%)"
+            }), use_container_width=True, hide_index=True
         )
 
+        coverage = annual_mix.groupby("year", as_index=False)["share"].sum()
+        st.subheader("Coverage Check")
+        st.dataframe(
+            coverage.rename(columns={"year": "Year", "share": "Sum of disaggregated published shares (%)"}),
+            use_container_width=True, hide_index=True
+        )
+        st.caption(
+            "Source: Ember, Yearly Electricity Data (Global release), Greece, 2019–2025. "
+            "The chart uses Ember's published source-level generation shares and excludes aggregated rows to avoid double counting. "
+            "If the displayed shares sum to less than 100%, the difference reflects source categories not represented in the disaggregated rows in this release; it is not redistributed."
+        )
     else:
+        show_notice("Annual Ember generation data unavailable for Greece (2019–2025).", "warning")
 
-        show_notice(
-            "Annual generation data unavailable.",
-            "warning"
-        )
-        # =====================================================
+
+# =====================================================
 # ENERGY SECURITY
 # =====================================================
 
